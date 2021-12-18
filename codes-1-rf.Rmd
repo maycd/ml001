@@ -1,0 +1,197 @@
+---
+title: "RF"
+author: "maycd"
+date: "`r Sys.time()`"
+output:
+  pdf_document:
+    toc: yes
+    toc_depth: "3"
+  html_document:
+    code_folding: show
+    highlight: haddock
+    theme: lumen
+    toc: yes
+    toc_depth: 3
+    toc_float: yes
+---
+
+# Import packages
+```{r setup, include=FALSE}
+rm(list=ls())
+
+knitr::opts_chunk$set(echo = TRUE, fig.align = 'center', fig.width = 9, fig.height = 6)
+
+if(!require("pacman")){install.packages("pacman")}
+pacman::p_load(BradleyTerry2, dplyr, ggplot2, caret, gbm, xgboost, recipes, ranger, vip, pdp, tictoc)
+```
+
+# Import data 285K obs. of 11 variables
+```{r}
+default <- read.csv("train.csv", stringsAsFactors = TRUE)[c("bad_good", "GENDER", "LOAN_FLAG", "OS_PRCP_SUM_THREE", "OS_PRCP_SUM_SIX", "G_OS_PRCP_SUM", "L6_CUST_DEBT_AVG_AMT", "CUST_DEBT_AMT", "L3_CUST_DEBT_AVG_AMT", "DEP_SA_OPEN_TENURE_DAYS", "DEP_SA_AVG_TENURE_DAYS")]
+str(default)
+```
+
+# Change the data type
+```{r}
+default$bad_good <- factor(default$bad_good)
+```
+
+```{r}
+summary(default)
+```
+
+# Stratified sampling split into train and test
+```{r}
+set.seed(123)
+split_strat <- rsample::initial_split(default, prop = 0.6, strata = 'bad_good')
+default_train <- rsample::training(split_strat)
+default_test <- rsample::testing(split_strat)
+```
+
+# Data preprocessing
+```{r}
+blueprint <- recipe(bad_good ~ ., data = default_train) %>%
+  step_normalize(all_numeric(), -all_outcomes()) %>%
+  step_center(all_numeric(), -all_outcomes()) %>%
+  step_scale(all_numeric(), -all_outcomes()) %>%
+  step_dummy(all_nominal(), -all_outcomes(), one_hot = TRUE)
+
+prepare <- prep(blueprint, training = default_train)
+prepare
+```
+
+```{r}
+default_train <- bake(prepare, new_data = default_train)
+summary(default_train)
+```
+
+```{r}
+default_test <- bake(prepare, new_data = default_test)
+```
+
+```{r}
+write.csv(default_train, file = "default_train.csv", row.names = FALSE)
+write.csv(default_test, file = "default_test.csv", row.names = FALSE)
+rm(list = ls())
+```
+
+# Read train data
+```{r}
+tic()
+default_train <- read.csv("default_train.csv", stringsAsFactors = TRUE)
+dim(default_train)  # dataset: default_train, response: bad_good
+toc()
+```
+
+# RF
+## Model before tuning
+```{r}
+# number of features
+n_features <- length(setdiff(names(default_train), "bad_good"))
+```
+
+```{r}
+tic()
+# train a default random forest model
+default_rf1 <- ranger(
+  bad_good ~ ., 
+  data = default_train,
+  mtry = floor(n_features / 3),
+  respect.unordered.factors = "order",
+  importance = 'impurity',
+  seed = 123
+)
+
+# get OOB RMSE
+(default_pred.err <- default_rf1$prediction.error)
+toc()
+```
+
+```{r}
+default_rf1
+```
+
+## Hyperparameter tuning
+```{r}
+# create hyperparameter grid
+hyper_grid <- expand.grid(
+  mtry = floor(n_features * c(.33, .4, .5)),
+  min.node.size = c(1, 3, 10),
+  replace = c(TRUE, FALSE),
+  sample.fraction = c(.5, .63, .8),
+  pred.err = NA
+)
+
+tic()
+# execute full cartesian grid search
+for(i in seq_len(nrow(hyper_grid))) {
+  # fit model for ith hyperparameter combination
+  fit <- ranger(
+    formula = bad_good ~ .,
+    data = default_train,
+    num.trees = n_features * 10,
+    mtry = hyper_grid$mtry[i],
+    min.node.size = hyper_grid$min.node.size[i],
+    replace = hyper_grid$replace[i],
+    sample.fraction = hyper_grid$sample.fraction[i],
+    verbose = FALSE,
+    seed = 123,
+    respect.unordered.factors = 'order',
+    )
+  #export OOB error
+  hyper_grid$pred.err[i] <- fit$prediction.error
+}
+toc()
+
+# assess top 10 models
+hyper_grid %>%
+  arrange(pred.err) %>%
+  mutate(perc_gain = (default_pred.err - pred.err) / default_pred.err * 100) %>%
+  head(10)
+
+best <- which.min(hyper_grid$pred.err)
+```
+
+## Model after tuning
+```{r}
+tic()
+default_rf <- ranger(
+    formula = bad_good ~ .,
+    data = default_train,
+    num.trees = n_features * 10,
+    mtry = hyper_grid$mtry[best],
+    importance = "impurity",
+    min.node.size = hyper_grid$min.node.size[best],
+    replace = hyper_grid$replace[best],
+    sample.fraction = hyper_grid$sample.fraction[best],
+    verbose = FALSE,
+    seed = 123,
+    respect.unordered.factors = 'order'
+  )
+default_rf
+# get OOB RMSE
+(default_rf_pred.err <- default_rf$prediction.error)
+toc()
+```
+
+```{r}
+save(default_rf, file = "default_rf.rda")
+```
+
+Variable importance
+```{r}
+vi_scores <- vi(default_rf)
+head(vi_scores, 5)
+vip(default_rf, num_features = 10, scale = TRUE)
+```
+
+PDP plots
+```{r}
+tic()
+p1 <- partial(default_rf, pred.var = vi_scores[[1, 1]]) %>% autoplot()
+p2 <- partial(default_rf, pred.var = vi_scores[[2, 1]]) %>% autoplot()
+p3 <- partial(default_rf, pred.var = vi_scores[[3, 1]]) %>% autoplot()
+p4 <- partial(default_rf, pred.var = vi_scores[[4, 1]]) %>% autoplot()
+grid.arrange(p1, p2, p3, p4, ncol = 2)
+toc()
+```

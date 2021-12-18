@@ -1,0 +1,161 @@
+---
+title: "XGB"
+author: "maycd"
+date: "`r Sys.time()`"
+output:
+  pdf_document:
+    toc: yes
+    toc_depth: "3"
+  html_document:
+    code_folding: show
+    highlight: haddock
+    theme: lumen
+    toc: yes
+    toc_depth: 3
+    toc_float: yes
+---
+
+```{r setup, include=FALSE}
+rm(list=ls())
+
+knitr::opts_chunk$set(echo = TRUE, fig.align = 'center', fig.width = 9, fig.height = 6)
+
+if(!require("pacman")){install.packages("pacman")}
+pacman::p_load(dplyr, ggplot2, ranger, gbm, xgboost, recipes, ranger, vip, pdp, tictoc)
+```
+
+```{r}
+default_train <- read.csv("default_train.csv", stringsAsFactors = TRUE)
+dim(default_train)  # dataset: default_train, response: bad_good
+```
+
+```{r}
+# number of features
+n_features <- length(setdiff(names(default_train), "bad_good"))
+```
+
+# XGBoost
+```{r}
+xgb_prep <- recipe(bad_good ~ ., data = default_train) %>%
+  step_integer(all_nominal()) %>%
+  prep(training = default_train, retain = TRUE) %>%
+  juice()
+
+X <- as.matrix(xgb_prep[setdiff(names(xgb_prep), "bad_good")])
+Y <- xgb_prep$bad_good
+```
+
+```{r}
+# before tuning
+tic()
+set.seed(123)
+default_xgb1 <- xgb.cv(
+  data = X,
+  label = Y,
+  nrounds = 2500,
+  objective = "binary:logistic", # logistic regression binary classification, output probability
+  early_stopping_rounds = 5, 
+  nfold = 10,
+  params = list(
+    eta = 0.01,
+    max_depth = 7,
+    min_child_weight = 2,
+    subsample = 0.8,
+    colsample_bytree = 0.9),
+  eval_metric = "error",
+  verbose = 0
+)  
+
+# minimum test CV RMSE
+min(default_xgb1$evaluation_log$test_error_mean)
+toc()
+```
+
+```{r}
+# final model
+tic()
+set.seed(123)
+default_xgb_final <- xgboost(
+  data = X,
+  label = Y,
+  nrounds = 2500,
+  objective = "binary:logistic",
+  early_stopping_rounds = 5,
+  verbose = 0,
+  params = list( 
+    eta = 0.1, 
+    max_depth = 7,
+    min_child_weight = 2,
+    subsample = 0.8,
+    colsample_bytree = 0.9,
+    gamma = 0, 
+    lambda = 1, 
+    alpha = 0
+  ),
+  eval_metric = "error"
+)  
+default_xgb_final
+toc()
+```
+
+```{r}
+save(default_xgb_final, file = "default_xgb_final.rda")
+```
+
+## Variable importance
+```{r}
+vi_scores <- vi(default_xgb_final)
+vi_scores
+```
+
+```{r}
+vip(default_xgb_final, num_features = 10, scale = TRUE)
+```
+
+## PDP plots
+```{r}
+tic()
+p1 <- partial(default_xgb_final, pred.var = vi_scores[[1, 1]], 
+              train = X, type = "regression") %>% autoplot()
+p2 <- partial(default_xgb_final, pred.var = vi_scores[[2, 1]], 
+              train = X, type = "regression") %>% autoplot()
+p3 <- partial(default_xgb_final, pred.var = vi_scores[[3, 1]], 
+              train = X, type = "regression") %>% autoplot()
+grid.arrange(p1, p2, p3, ncol = 3)
+toc()
+```
+
+# Prediction
+```{r}
+default_test <- read.csv("default_test.csv", stringsAsFactors = TRUE)
+dim(default_test)  # dataset: default_test, response: bad_good
+```
+
+```{r}
+Y_pred <- predict(default_xgb_final, newdata = data.matrix(default_test[!names(default_test) %in% c("bad_good")]))
+
+table(Y_pred)
+```
+
+
+```{r}
+Y_pred_class <- ifelse(Y_pred < 0.5, 0, 1)
+
+table(default_test$bad_good, Y_pred_class)
+```
+
+```{r}
+mean(Y_pred_class - default_test$bad_good)
+```
+```{r}
+# precision = TP/(TP+FP)
+pred_precision <- 1993/(1993+1)
+pred_precision
+# recall = TP/(TP+FN)
+pred_recall <- 1993/(1993+0)
+pred_recall
+# F1 score
+pred_f1 <- 2/(1/pred_precision + 1/pred_recall)
+pred_f1
+```
+

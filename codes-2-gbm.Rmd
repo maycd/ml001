@@ -1,0 +1,93 @@
+---
+title: "GBM"
+author: "maycd"
+date: "`r Sys.time()`"
+output:
+  pdf_document:
+    toc: yes
+    toc_depth: "3"
+  html_document:
+    code_folding: show
+    highlight: haddock
+    theme: lumen
+    toc: yes
+    toc_depth: 3
+    toc_float: yes
+---
+
+```{r setup, include=FALSE}
+rm(list=ls())
+
+knitr::opts_chunk$set(echo = TRUE, fig.align = 'center', fig.width = 9, fig.height = 6)
+
+if(!require("pacman")){install.packages("pacman")}
+pacman::p_load(dplyr, ggplot2, ranger, gbm, xgboost, recipes, vip, pdp, tictoc)
+```
+
+# Import train
+```{r}
+default_train <- read.csv("default_train.csv", stringsAsFactors = TRUE)
+dim(default_train)  # dataset: default_train, response: bad_good
+```
+
+# GBM
+```{r}
+tic()
+set.seed(123)
+default_gbm <- gbm(
+  formula = bad_good ~ .,
+  data = default_train,
+  distribution = "gaussian",  # SSE loss function
+  n.trees = 3000,  # start with sufficiently large n.trees
+  shrinkage = 0.1,
+  interaction.depth = 5,
+  n.minobsinnode = 10,
+  cv.folds = 10
+)
+# find index for number trees with minimum CV error
+best <- which.min(default_gbm$cv.error)
+
+# get MSE and compute RMSE
+sqrt(default_gbm$cv.error[best])
+
+toc()
+```
+
+```{r}
+best <- which.min(default_gbm$cv.error)
+sqrt(default_gbm$cv.error[best])
+```
+
+```{r}
+save(default_gbm, file = "default_gbm.rda")
+```
+
+```{r}
+# plot error curve
+gbm.perf(default_gbm, method = "cv")
+```
+
+## Variable importance
+```{r}
+vi_scores <- vi(default_gbm)
+vi_scores
+```
+
+```{r}
+vip(default_gbm, num_features = 10, scale = TRUE)
+```
+
+## PDP plots
+```{r}
+tic()
+p1 <- partial(default_gbm, pred.var = vi_scores[[1, 1]], n.trees = 100) %>%
+autoplot()
+p2 <- partial(default_gbm, pred.var = vi_scores[[2, 1]], n.trees = 100) %>%
+autoplot()
+p3 <- partial(default_gbm, pred.var = vi_scores[[3, 1]], n.trees = 100) %>%
+autoplot()
+p4 <- partial(default_gbm, pred.var = vi_scores[[4, 1]], n.trees = 100) %>%
+autoplot()
+grid.arrange(p1, p2, p3, p4, ncol = 2)
+toc()
+```
